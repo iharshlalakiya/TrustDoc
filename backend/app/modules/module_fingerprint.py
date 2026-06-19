@@ -9,23 +9,24 @@ import fitz  # PyMuPDF
 from docx import Document
 
 
-def analyze_font_fingerprint(file_path: str, file_type: str) -> dict:
+def analyze_font_fingerprint(file_path: str, file_type: str, baseline: dict = None) -> dict:
     """
-    Analyze font consistency and detect formatting anomalies.
+    Analyze font consistency and detect formatting anomalies using structural baseline.
     
     Args:
         file_path: Path to the file
         file_type: 'pptx', 'pdf', or 'docx'
+        baseline: Optional baseline dict from module0 with role expectations
     
     Returns:
         Dict with consistency analysis, dominant fonts, and anomalies
     """
     if file_type == "pptx":
-        return _analyze_pptx_fonts(file_path)
+        return _analyze_pptx_fonts(file_path, baseline)
     elif file_type == "pdf":
-        return _analyze_pdf_fonts(file_path)
+        return _analyze_pdf_fonts(file_path, baseline)
     elif file_type == "docx":
-        return _analyze_docx_fonts(file_path)
+        return _analyze_docx_fonts(file_path, baseline)
     else:
         return {
             "overall_consistency": "Unknown",
@@ -125,8 +126,14 @@ def _analyze_pptx_fonts(file_path: str) -> dict:
     }
 
 
-def _analyze_pdf_fonts(file_path: str) -> dict:
-    """Analyze font fingerprint for PDF files with structural role awareness."""
+def _analyze_pdf_fonts(file_path: str, baseline: dict = None) -> dict:
+    """Analyze font fingerprint for PDF files with baseline-aware role checking."""
+    
+    # If baseline provided, use its run_details with pre-classified roles
+    if baseline and baseline.get("run_details"):
+        return _analyze_with_baseline(baseline)
+    
+    # Fallback to original analysis if no baseline
     doc = fitz.open(file_path)
     dominant_fonts = {}
     font_anomalies = []
@@ -458,3 +465,87 @@ def _calculate_consistency(
         confidence = 0.90
     
     return consistency, confidence
+
+
+
+def _analyze_with_baseline(baseline: dict) -> dict:
+    """
+    Analyze fonts using pre-established baseline with role expectations.
+    Only flag runs that deviate from THEIR OWN ROLE's expected pattern.
+    """
+    runs = baseline.get("run_details", [])
+    role_expectations = baseline.get("role_expectations", {})
+    
+    font_anomalies = []
+    spacing_anomalies = []
+    
+    # Group runs by page and role
+    pages_data = defaultdict(lambda: defaultdict(list))
+    for run in runs:
+        page = run.get("page", 1)
+        role = run.get("role", "body_text")
+        pages_data[page][role].append(run)
+    
+    # Check each run against ITS ROLE's expectations
+    for page_num, roles in pages_data.items():
+        for role, role_runs in roles.items():
+            if role not in role_expectations:
+                continue  # No expectations for this role
+            
+            expected = role_expectations[role]
+            size_min, size_max = expected.get("size_range", (8, 72))
+            tolerance = expected.get("tolerance", "medium")
+            
+            # Skip anomaly detection for high-tolerance roles
+            if tolerance == "high":
+                continue
+            
+            for run in role_runs:
+                size = run.get("size", 12)
+                font = run.get("font", "Unknown")
+                
+                # Only flag if OUTSIDE the role's expected range
+                if size < size_min * 0.9 or size > size_max * 1.1:
+                    font_anomalies.append({
+                        "location": f"Page {page_num}, {role}",
+                        "expected_size": f"{size_min:.1f}-{size_max:.1f}pt",
+                        "found_size": f"{size:.1f}pt",
+                        "severity": "low"
+                    })
+                
+                # Check if font is unusual for this role
+                common_fonts = expected.get("common_fonts", [])
+                if common_fonts and font not in common_fonts and len(role_runs) > 5:
+                    # Only flag if this role has enough samples and font is truly rare
+                    font_counter = Counter([r.get("font") for r in role_runs])
+                    if font_counter[font] < len(role_runs) * 0.05:  # <5% frequency
+                        font_anomalies.append({
+                            "location": f"Page {page_num}, {role}",
+                            "expected_font": "/".join(common_fonts[:2]),
+                            "found_font": font,
+                            "severity": "low"
+                        })
+    
+    # Calculate overall consistency
+    total_runs = len(runs)
+    anomaly_rate = len(font_anomalies) / max(total_runs, 1)
+    
+    if anomaly_rate < 0.02:
+        consistency = "Consistent"
+        confidence = 0.90
+    elif anomaly_rate < 0.05:
+        consistency = "Mixed"
+        confidence = 0.75
+    else:
+        consistency = "Inconsistent"
+        confidence = 0.60
+    
+    return {
+        "overall_consistency": consistency,
+        "confidence": confidence,
+        "dominant_fonts": {f"role_{r}": e.get("common_fonts", ["Unknown"])[0] 
+                          for r, e in role_expectations.items()},
+        "font_anomalies": font_anomalies[:10],
+        "spacing_anomalies": spacing_anomalies[:10],
+        "baseline_used": True
+    }

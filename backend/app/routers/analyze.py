@@ -21,6 +21,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, status
 
 from app.db.supabase_client import get_supabase_client
+from app.modules.module0_baseline import establish_baseline
 from app.modules.module1_classification import classify_document
 from app.modules.module2_ocr import validate_ocr
 from app.modules.module_fingerprint import analyze_font_fingerprint
@@ -292,6 +293,28 @@ async def analyze_document(document_id: str):
         analysis_rows: list[dict] = []
         extracted_text: str = ""
         classification: dict = {}
+        baseline: dict = {}
+
+        # ── Module 0: Baseline Establishment ──────────────────────────────
+        try:
+            baseline = establish_baseline(str(tmp_path), file_type)
+            baseline["score"] = None  # Not a risk score
+            baseline["confidence"] = None
+            all_results["module0_baseline"] = baseline
+            _persist_analysis_result(
+                supabase, document_id, 0, "baseline", baseline
+            )
+            analysis_rows.append({"module": "baseline", **baseline})
+            logger.info("Module 0 (baseline) complete for %s", document_id)
+        except Exception:
+            err = traceback.format_exc()
+            logger.error("Module 0 failed for %s:\n%s", document_id, err)
+            error_result = {"error": str(err), "score": None, "confidence": None}
+            all_results["module0_baseline"] = error_result
+            _persist_analysis_result(
+                supabase, document_id, 0, "baseline", error_result, error=err
+            )
+            analysis_rows.append({"module": "baseline", "error": err})
 
         # ── Module 1: Classification ──────────────────────────────────────
         try:
@@ -340,7 +363,7 @@ async def analyze_document(document_id: str):
 
         # ── Module 3: Font Fingerprint ────────────────────────────────────
         try:
-            fingerprint_result = analyze_font_fingerprint(str(tmp_path), file_type)
+            fingerprint_result = analyze_font_fingerprint(str(tmp_path), file_type, baseline)
             fingerprint_result["score"] = _fingerprint_score(fingerprint_result)
             all_results["module3_fingerprint"] = fingerprint_result
             _persist_analysis_result(
