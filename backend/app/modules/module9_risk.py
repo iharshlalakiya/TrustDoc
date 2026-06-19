@@ -27,7 +27,7 @@ def calculate_risk_score(module_results: dict) -> dict:
         module_results: Dict of module results from the analysis pipeline
     
     Returns:
-        Dict with overall_score, risk_level, confidence_level, axes breakdown
+        Dict with overall_score, risk_level, confidence_level, axes breakdown, and calibration warnings
     """
     # Calculate each axis score
     axes = {
@@ -44,19 +44,53 @@ def calculate_risk_score(module_results: dict) -> dict:
     # Determine risk level
     risk_level = _classify_risk(overall_score)
     
-    # Calculate confidence level based on module agreement
+    # Check for miscalibration and calculate confidence
+    miscalibration_warnings = _detect_miscalibration(module_results)
     confidence_level = _calculate_confidence(module_results, axis_scores)
     
     # Calculate forgery probability
     forgery_probability = min(overall_score / 100.0 * 0.85, 0.85)
     
-    return {
+    result = {
         "overall_score": overall_score,
         "risk_level": risk_level,
         "confidence_level": confidence_level,
         "forgery_probability": round(forgery_probability, 4),
         "axes": axes
     }
+    
+    # Add calibration warnings if present
+    if miscalibration_warnings:
+        result["calibration_warnings"] = miscalibration_warnings
+    
+    return result
+
+
+def _detect_miscalibration(module_results: dict) -> List[Dict[str, Any]]:
+    """Detect modules that may be miscalibrated based on flag rate.
+    
+    Returns:
+        List of warning dicts with module name, flag rate, and message
+    """
+    warnings = []
+    
+    for module_name in ["module2_ocr", "module3_fingerprint", "heatmap"]:
+        module_result = module_results.get(module_name, {})
+        if isinstance(module_result, dict) and not module_result.get("error"):
+            flag_rate = _check_module_flag_rate(module_result, module_name)
+            
+            if flag_rate > 0.4:
+                warnings.append({
+                    "module": module_name,
+                    "flag_rate": round(flag_rate * 100, 1),
+                    "message": (
+                        f"This module's flag rate ({round(flag_rate * 100, 1)}%) is unusually high "
+                        "and may indicate a calibration issue rather than genuine tampering. "
+                        "Recommend manual review of this specific module's findings."
+                    )
+                })
+    
+    return warnings
 
 
 def _calculate_metadata_axis(module_results: dict) -> dict:
@@ -155,9 +189,12 @@ def _calculate_content_axis(module_results: dict) -> dict:
 
 
 def _calculate_visual_axis(module_results: dict) -> dict:
-    """Calculate Visual Authenticity axis score."""
+    """Calculate Visual Authenticity axis score with category grouping."""
     score = 0
     factors = []
+    
+    # Track flag categories and their max severity
+    category_severities = {}  # {category: max_severity_value}
     
     # Module 3: Font fingerprint
     module3 = module_results.get("module3_fingerprint", {})
@@ -166,42 +203,44 @@ def _calculate_visual_axis(module_results: dict) -> dict:
         consistency = module3.get("overall_consistency", "Consistent")
         
         if consistency == "Inconsistent":
-            score += 25
+            category_severities["font_consistency"] = 25
             factors.append("Inconsistent font usage detected")
         elif consistency == "Mixed":
-            score += 12
+            category_severities["font_consistency"] = 12
             factors.append("Mixed font patterns found")
         
-        # Font anomalies
+        # Font anomalies - group by category, take MAX severity
         font_anomalies = module3.get("font_anomalies", [])
-        if isinstance(font_anomalies, list):
-            for anomaly in font_anomalies[:5]:
+        if isinstance(font_anomalies, list) and len(font_anomalies) > 0:
+            # Find the highest severity among all font anomalies
+            max_severity = 0
+            for anomaly in font_anomalies:
                 if isinstance(anomaly, dict):
                     severity = anomaly.get("severity", "low")
-                    location = anomaly.get("location", "Unknown")
                     if severity == "high":
-                        score += 15
-                        factors.append(f"Critical font anomaly at {location}")
+                        max_severity = max(max_severity, 15)
                     elif severity == "medium":
-                        score += 8
-                        factors.append(f"Font mismatch at {location}")
+                        max_severity = max(max_severity, 8)
                     else:
-                        score += 3
-                        factors.append(f"Minor font variation at {location}")
+                        max_severity = max(max_severity, 3)
+            
+            if max_severity > 0:
+                category_severities["font_anomalies"] = max_severity
+                factors.append(f"{len(font_anomalies)} font variation(s) detected")
         
-        # Spacing anomalies
+        # Spacing anomalies - group into single category
         spacing_anomalies = module3.get("spacing_anomalies", [])
         if isinstance(spacing_anomalies, list) and len(spacing_anomalies) > 0:
-            score += len(spacing_anomalies) * 3
-            factors.append(f"{len(spacing_anomalies)} spacing irregularities detected")
+            category_severities["spacing_anomalies"] = 3 * min(len(spacing_anomalies), 3)  # Cap contribution
+            factors.append(f"{len(spacing_anomalies)} spacing irregularit{'y' if len(spacing_anomalies)==1 else 'ies'}")
     
     # Module 8: Heatmap (high-intensity tamper regions)
     module8 = module_results.get("heatmap", {})
     
     if isinstance(module8, dict):
         pages = module8.get("pages", [])
-        high_intensity_count = 0
-        medium_intensity_count = 0
+        high_intensity_boxes = []
+        medium_intensity_boxes = []
         
         for page in pages:
             if isinstance(page, dict):
@@ -212,18 +251,26 @@ def _calculate_visual_axis(module_results: dict) -> dict:
                     if isinstance(box, dict):
                         intensity = box.get("intensity", "low")
                         if intensity == "high":
-                            high_intensity_count += 1
-                            reason = box.get("reason", "Unknown")
-                            factors.append(f"High-risk region on page {page_num}: {reason}")
+                            high_intensity_boxes.append((page_num, box.get("reason", "Unknown")))
                         elif intensity == "medium":
-                            medium_intensity_count += 1
+                            medium_intensity_boxes.append((page_num, box.get("reason", "Unknown")))
         
-        score += high_intensity_count * 20
-        score += medium_intensity_count * 8
+        # Group tamper regions by category
+        if high_intensity_boxes:
+            category_severities["high_tamper_regions"] = 20
+            # Show up to 2 examples
+            for page_num, reason in high_intensity_boxes[:2]:
+                factors.append(f"High-risk region on page {page_num}: {reason}")
+            if len(high_intensity_boxes) > 2:
+                factors.append(f"+ {len(high_intensity_boxes) - 2} more high-risk region(s)")
         
-        if medium_intensity_count > 0 and high_intensity_count == 0:
-            factors.append(f"{medium_intensity_count} medium-risk regions detected")
+        if medium_intensity_boxes:
+            category_severities["medium_tamper_regions"] = 8
+            if not high_intensity_boxes:  # Only show if no high-intensity
+                factors.append(f"{len(medium_intensity_boxes)} medium-risk region(s) detected")
     
+    # Sum across distinct categories (not individual flags)
+    score = sum(category_severities.values())
     score = min(score, 100)
     
     return {
@@ -287,7 +334,7 @@ def _calculate_compliance_axis(module_results: dict) -> dict:
 
 def _calculate_confidence(module_results: dict, axis_scores: List[int]) -> ConfidenceLevel:
     """
-    Calculate confidence level based on module agreement.
+    Calculate confidence level based on module agreement and calibration sanity checks.
     
     Args:
         module_results: Dict of module results
@@ -298,11 +345,22 @@ def _calculate_confidence(module_results: dict, axis_scores: List[int]) -> Confi
     """
     # Count successfully executed modules
     successful_modules = 0
+    potentially_miscalibrated = []
+    
     for module_name in ["module2_ocr", "module3_fingerprint", "module5_metadata", 
                         "module6_content", "module7_compliance", "heatmap"]:
         module_result = module_results.get(module_name, {})
         if isinstance(module_result, dict) and not module_result.get("error"):
             successful_modules += 1
+            
+            # BUG 4: Sanity check for miscalibration
+            # If a module flags >40% of analyzed regions, it may be miscalibrated
+            flag_rate = _check_module_flag_rate(module_result, module_name)
+            if flag_rate > 0.4:
+                potentially_miscalibrated.append({
+                    "module": module_name,
+                    "flag_rate": flag_rate
+                })
     
     # Calculate spread of axis scores
     if len(axis_scores) > 0:
@@ -312,13 +370,58 @@ def _calculate_confidence(module_results: dict, axis_scores: List[int]) -> Confi
     else:
         spread = 0
     
-    # Determine confidence
+    # Downgrade confidence if miscalibration detected
+    if potentially_miscalibrated:
+        return "Low"  # Miscalibration is a critical issue
+    
+    # Determine confidence based on module success and agreement
     if successful_modules >= 5 and spread <= 20:
         return "High"
     elif successful_modules >= 3 and spread <= 40:
         return "Medium"
     else:
         return "Low"
+
+
+def _check_module_flag_rate(module_result: dict, module_name: str) -> float:
+    """
+    Check if a module is flagging an unusually high percentage of content.
+    
+    Returns:
+        Flag rate (0.0 to 1.0) representing percentage of content flagged
+    """
+    if module_name == "module3_fingerprint":
+        # Check font anomaly rate
+        font_anomalies = module_result.get("font_anomalies", [])
+        # If we have dominant fonts data, calculate ratio
+        dominant_fonts = module_result.get("dominant_fonts", {})
+        if dominant_fonts and font_anomalies:
+            # Rough estimate: if >20 anomalies per page, likely miscalibrated
+            pages = len(dominant_fonts)
+            if pages > 0:
+                anomalies_per_page = len(font_anomalies) / pages
+                if anomalies_per_page > 20:
+                    return min(1.0, anomalies_per_page / 50)  # Normalize to 0-1
+    
+    elif module_name == "heatmap":
+        # Check heatmap box flagging rate
+        pages = module_result.get("pages", [])
+        if pages:
+            total_boxes = sum(len(p.get("boxes", [])) for p in pages)
+            total_pages = len(pages)
+            if total_pages > 0:
+                boxes_per_page = total_boxes / total_pages
+                # If >15 flagged boxes per page on average, likely over-flagging
+                if boxes_per_page > 15:
+                    return min(1.0, boxes_per_page / 30)
+    
+    elif module_name == "module2_ocr":
+        anomalies = module_result.get("anomalies_found", [])
+        # If >10 OCR anomalies, may be miscalibrated
+        if len(anomalies) > 10:
+            return min(1.0, len(anomalies) / 20)
+    
+    return 0.0  # No miscalibration detected
 
 
 def _classify_risk(score: int) -> RiskLevel:
