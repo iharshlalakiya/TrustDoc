@@ -38,18 +38,20 @@ async def get_report(document_id: str):
 
     # ── Fetch document row ────────────────────────────────────────────────
     supabase = get_supabase_client()
-    doc_result = (
-        supabase.table("documents")
-        .select("id, filename, file_type, file_url, status, uploaded_at")
-        .eq("id", document_id)
-        .single()
-        .execute()
-    )
-    if not doc_result.data:
+    try:
+        doc_result = (
+            supabase.table("documents")
+            .select("id, filename, file_type, file_url, status, uploaded_at")
+            .eq("id", document_id)
+            .single()
+            .execute()
+        )
+    except Exception:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Document '{document_id}' not found.",
         )
+
 
 
     document = doc_result.data

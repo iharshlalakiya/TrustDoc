@@ -10,6 +10,19 @@ router = APIRouter(tags=["upload"])
 STORAGE_BUCKET = "documents"
 
 
+def _sanitize_filename(filename: str) -> str:
+    import re
+    from pathlib import Path
+    p = Path(filename)
+    stem = p.stem
+    suffix = p.suffix
+    clean_stem = re.sub(r'[^a-zA-Z0-9._-]', '_', stem)
+    clean_stem = re.sub(r'__+', '_', clean_stem).strip('_')
+    if not clean_stem:
+        clean_stem = "document"
+    return f"{clean_stem}{suffix}"
+
+
 @router.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
     if not file.filename:
@@ -18,12 +31,13 @@ async def upload_document(file: UploadFile = File(...)):
             detail="Filename is required.",
         )
 
-    file_type = validate_file_type(file.filename)
+    filename = _sanitize_filename(file.filename)
+    file_type = validate_file_type(filename)
     content = await file.read()
     validate_file_size(len(content))
 
     document_id = str(uuid.uuid4())
-    storage_path = f"{document_id}/{file.filename}"
+    storage_path = f"{document_id}/{filename}"
 
     try:
         supabase = get_supabase_client()
@@ -41,7 +55,7 @@ async def upload_document(file: UploadFile = File(...)):
             .insert(
                 {
                     "id": document_id,
-                    "filename": file.filename,
+                    "filename": filename,
                     "file_url": file_url,
                     "file_type": file_type,
                     "status": "pending",
@@ -49,6 +63,7 @@ async def upload_document(file: UploadFile = File(...)):
             )
             .execute()
         )
+
 
         row = result.data[0]
     except HTTPException:

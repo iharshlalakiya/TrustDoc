@@ -53,19 +53,21 @@ def _fetch_document_row(supabase, document_id: str) -> dict:
             detail=f"Document '{document_id}' not found.",
         )
 
-    result = (
-        supabase.table("documents")
-        .select("id, filename, file_type, file_url, status")
-        .eq("id", document_id)
-        .single()
-        .execute()
-    )
-    if not result.data:
+    try:
+        result = (
+            supabase.table("documents")
+            .select("id, filename, file_type, file_url, status")
+            .eq("id", document_id)
+            .single()
+            .execute()
+        )
+    except Exception:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Document '{document_id}' not found.",
         )
     return result.data
+
 
 
 
