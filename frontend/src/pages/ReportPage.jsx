@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import RiskScoreGauge from '../components/RiskScoreGauge.jsx'
+import RiskRadarChart from '../components/RiskRadarChart.jsx'
+import TamperHeatmapViewer from '../components/TamperHeatmapViewer.jsx'
 
 const API = '/api'
 
@@ -243,6 +245,14 @@ export default function ReportPage() {
   const module10 = results?.find(r => r.module_number === 10)
   const recommendedAction = module10?.findings?.recommended_action || 'Review'
 
+  // Find module 9 (risk) and module 8 (heatmap) results
+  const module9 = results?.find(r => r.module_number === 9)
+  const riskResult = module9?.findings || null
+  const confidenceLevel = riskResult?.confidence_level || 'Medium'
+  
+  const module8 = results?.find(r => r.module_number === 8)
+  const heatmapResult = module8?.findings || null
+
   return (
     <div className="mx-auto max-w-4xl px-6 py-10 sm:py-16">
       {/* ── Hero section ─────────────────────────────────────────────── */}
@@ -288,6 +298,72 @@ export default function ReportPage() {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* ── Multi-axis analysis section ──────────────────────────────── */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8 animate-fade-in">
+        {/* Left: Radar Chart */}
+        <RiskRadarChart riskResult={riskResult} />
+
+        {/* Right: Confidence explanation */}
+        <div className="glass rounded-xl p-6">
+          <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+            <svg className="h-4 w-4 text-brand-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+            </svg>
+            Analysis Confidence
+          </h3>
+
+          <div className="mb-4">
+            <span className={`inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold ring-1 ${
+              confidenceLevel === 'High' ? 'bg-emerald-500/15 text-emerald-300 ring-emerald-500/30'
+                : confidenceLevel === 'Low' ? 'bg-red-500/15 text-red-300 ring-red-500/30'
+                  : 'bg-amber-500/15 text-amber-300 ring-amber-500/30'
+            }`}>
+              <span className={`h-2 w-2 rounded-full ${
+                confidenceLevel === 'High' ? 'bg-emerald-400'
+                  : confidenceLevel === 'Low' ? 'bg-red-400'
+                    : 'bg-amber-400'
+              }`} />
+              {confidenceLevel} Confidence
+            </span>
+          </div>
+
+          <div className="space-y-4 text-sm text-slate-400">
+            <p className="leading-relaxed">
+              The confidence level indicates how reliable this analysis is based on module agreement and data completeness.
+            </p>
+
+            <div className="space-y-2 text-xs">
+              <div className="flex items-start gap-2">
+                <span className="text-emerald-400 font-bold mt-0.5">High:</span>
+                <span>5+ modules ran successfully and scores align within 20 points</span>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="text-amber-400 font-bold mt-0.5">Medium:</span>
+                <span>3+ modules ran with moderate score agreement (within 40 points)</span>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="text-red-400 font-bold mt-0.5">Low:</span>
+                <span>Fewer modules completed or significant score disagreement (&gt;40 points)</span>
+              </div>
+            </div>
+
+            <div className="pt-3 border-t border-white/5">
+              <p className="text-[11px] text-slate-500 italic">
+                A {confidenceLevel.toLowerCase()} confidence score means the multi-axis risk assessment 
+                {confidenceLevel === 'High' ? ' is highly reliable and consistent across all analysis dimensions.' 
+                  : confidenceLevel === 'Low' ? ' should be interpreted cautiously due to limited or conflicting data.'
+                    : ' is reasonably reliable but may benefit from additional verification.'}
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Tamper heatmap section ───────────────────────────────────── */}
+      <div className="mb-8 animate-fade-in">
+        <TamperHeatmapViewer heatmapResult={heatmapResult} />
       </div>
 
       {/* ── Module results grid ──────────────────────────────────────── */}
