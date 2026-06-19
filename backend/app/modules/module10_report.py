@@ -139,6 +139,7 @@ def generate_verdict(all_module_results: dict, risk_result: dict) -> dict:
             summary             (str)  — 3–5 sentence explanation
             recommended_action  (str)  — "Accept" | "Review" | "Reject"
             generated_at        (str)  — ISO-8601 UTC timestamp
+            error               (str)  — present if generation failed
     """
     module_findings_json = json.dumps(all_module_results, indent=2, ensure_ascii=False, default=str)
     risk_result_json = json.dumps(risk_result, indent=2, ensure_ascii=False, default=str)
@@ -150,11 +151,35 @@ def generate_verdict(all_module_results: dict, risk_result: dict) -> dict:
 
     try:
         raw_response = call_gemini(prompt)
+        logger.info("Module 10: Received Gemini response (length=%d)", len(raw_response))
+        
         parsed = _parse_json_response(raw_response)
+        
+        # Check if parsing returned fallback
+        if parsed == _FALLBACK:
+            logger.error("Module 10: JSON parsing failed. Raw response: %s", raw_response[:500])
+            return {
+                **_FALLBACK,
+                "error": "Failed to parse Gemini response",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        
         result = _validate_result(parsed)
+        
     except RuntimeError as exc:
-        logger.error("Module 10: Gemini call failed — %s", exc)
-        result = {**_FALLBACK, "error": str(exc)}
+        logger.error("Module 10: Gemini call failed with RuntimeError: %s", exc, exc_info=True)
+        return {
+            **_FALLBACK,
+            "error": f"Gemini API error: {str(exc)}",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as exc:
+        logger.error("Module 10: Unexpected error: %s", exc, exc_info=True)
+        return {
+            **_FALLBACK,
+            "error": f"Unexpected error: {str(exc)}",
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
 
     result["generated_at"] = datetime.now(timezone.utc).isoformat()
     return result
