@@ -23,9 +23,11 @@ from fastapi import APIRouter, HTTPException, status
 from app.db.supabase_client import get_supabase_client
 from app.modules.module1_classification import classify_document
 from app.modules.module2_ocr import validate_ocr
+from app.modules.module_fingerprint import analyze_font_fingerprint
 from app.modules.module5_metadata import analyze_metadata
 from app.modules.module6_content import check_content_consistency
 from app.modules.module7_compliance import review_compliance
+from app.modules.module_heatmap import generate_tamper_heatmap
 from app.modules.module9_risk import calculate_risk_score
 from app.modules.module10_report import generate_verdict
 
@@ -201,6 +203,24 @@ def _ocr_score(result: dict) -> float:
     return min(100.0, anomaly_count * 8.0)
 
 
+def _fingerprint_score(result: dict) -> float:
+    """Derive a 0-100 risk score from module 3 font fingerprint output."""
+    if result.get("error"):
+        return 50.0
+    consistency = result.get("overall_consistency", "Consistent")
+    font_anomalies = len(result.get("font_anomalies", []))
+    spacing_anomalies = len(result.get("spacing_anomalies", []))
+    
+    # Base score from consistency level
+    consistency_scores = {"Consistent": 10, "Mixed": 45, "Inconsistent": 75}
+    base_score = consistency_scores.get(consistency, 50)
+    
+    # Add points for anomalies
+    anomaly_score = font_anomalies * 5 + spacing_anomalies * 2
+    
+    return min(100.0, base_score + anomaly_score)
+
+
 def _metadata_score(result: dict) -> float:
     """Derive a 0-100 risk score from module 5 metadata output."""
     return float(
@@ -316,6 +336,26 @@ async def analyze_document(document_id: str):
             )
             analysis_rows.append({"module": "ocr_validation", "error": err})
 
+        # ── Module 3: Font Fingerprint ────────────────────────────────────
+        try:
+            fingerprint_result = analyze_font_fingerprint(str(tmp_path), file_type)
+            fingerprint_result["score"] = _fingerprint_score(fingerprint_result)
+            all_results["module3_fingerprint"] = fingerprint_result
+            _persist_analysis_result(
+                supabase, document_id, 3, "font_fingerprint", fingerprint_result
+            )
+            analysis_rows.append({"module": "font_fingerprint", **fingerprint_result})
+            logger.info("Module 3 (fingerprint) complete for %s", document_id)
+        except Exception:
+            err = traceback.format_exc()
+            logger.error("Module 3 failed for %s:\n%s", document_id, err)
+            error_result = {"error": str(err), "score": 50.0, "confidence": None}
+            all_results["module3_fingerprint"] = error_result
+            _persist_analysis_result(
+                supabase, document_id, 3, "font_fingerprint", error_result, error=err
+            )
+            analysis_rows.append({"module": "font_fingerprint", "error": err})
+
         # ── Extract text for LLM modules ──────────────────────────────────
         try:
             extracted_text = _extract_text_for_llm(str(tmp_path), file_type)
@@ -383,6 +423,38 @@ async def analyze_document(document_id: str):
                 supabase, document_id, 7, "compliance_review", error_result, error=err
             )
             analysis_rows.append({"module": "compliance_review", "error": err})
+
+        # ── Heatmap Module ────────────────────────────────────────────────
+        try:
+            # Gather flagged findings from all modules
+            flagged_findings = {
+                "document_id": document_id,
+                "module2_ocr": all_results.get("module2_ocr", {}),
+                "module3_fingerprint": all_results.get("module3_fingerprint", {}),
+                "module5_metadata": all_results.get("module5_metadata", {}),
+                "module6_content": all_results.get("module6_content", {}),
+                "module7_compliance": all_results.get("module7_compliance", {}),
+            }
+            heatmap_result = await generate_tamper_heatmap(
+                str(tmp_path), file_type, flagged_findings
+            )
+            heatmap_result["score"] = None
+            heatmap_result["confidence"] = None
+            all_results["heatmap"] = heatmap_result
+            _persist_analysis_result(
+                supabase, document_id, 8, "heatmap", heatmap_result
+            )
+            analysis_rows.append({"module": "heatmap", **heatmap_result})
+            logger.info("Heatmap module complete for %s", document_id)
+        except Exception:
+            err = traceback.format_exc()
+            logger.error("Heatmap module failed for %s:\n%s", document_id, err)
+            error_result = {"error": str(err), "score": None, "confidence": None, "pages": []}
+            all_results["heatmap"] = error_result
+            _persist_analysis_result(
+                supabase, document_id, 8, "heatmap", error_result, error=err
+            )
+            analysis_rows.append({"module": "heatmap", "error": err})
 
         # ── Module 9: Risk Score ──────────────────────────────────────────
         try:
