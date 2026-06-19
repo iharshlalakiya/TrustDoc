@@ -126,7 +126,7 @@ def _analyze_pptx_fonts(file_path: str) -> dict:
 
 
 def _analyze_pdf_fonts(file_path: str) -> dict:
-    """Analyze font fingerprint for PDF files."""
+    """Analyze font fingerprint for PDF files with structural role awareness."""
     doc = fitz.open(file_path)
     dominant_fonts = {}
     font_anomalies = []
@@ -136,35 +136,74 @@ def _analyze_pdf_fonts(file_path: str) -> dict:
         page = doc[page_idx]
         page_num = page_idx + 1
         page_fonts = []
+        page_spans = []  # Store spans with position for structural analysis
         
         blocks = page.get_text("dict")["blocks"]
         
+        # First pass: collect all font info with positions
         for block in blocks:
             if block.get("type") != 0:  # Skip non-text blocks
                 continue
             
+            bbox = block.get("bbox", [0, 0, 0, 0])
             for line in block.get("lines", []):
                 for span in line.get("spans", []):
                     font_info = _extract_font_info_pdf(span)
                     if font_info:
+                        font_info["y_position"] = bbox[1]  # Top coordinate
+                        font_info["text_length"] = len(span.get("text", ""))
                         page_fonts.append(font_info)
+                        page_spans.append(font_info)
         
-        # Determine dominant font for this page
-        if page_fonts:
-            font_counter = Counter([f["signature"] for f in page_fonts])
-            dominant_sig = font_counter.most_common(1)[0][0]
-            dominant_fonts[f"page_{page_num}"] = dominant_sig
-            
-            # Flag fonts that deviate significantly
-            for font_info in page_fonts:
-                if font_info["signature"] != dominant_sig and font_counter[font_info["signature"]] < 3:
-                    if not any(a.get("found_font") == font_info["family"] for a in font_anomalies):
-                        font_anomalies.append({
-                            "location": f"Page {page_num}",
-                            "expected_font": dominant_sig,
-                            "found_font": font_info["signature"],
-                            "severity": "low"
-                        })
+        if not page_fonts:
+            continue
+        
+        # Build frequency distribution and classify structural roles
+        font_counter = Counter([f["signature"] for f in page_fonts])
+        size_counter = Counter([f["size"] for f in page_fonts])
+        total_spans = len(page_fonts)
+        
+        # Calculate median size for role classification
+        sizes = [f["size"] for f in page_fonts]
+        median_size = statistics.median(sizes) if sizes else 12
+        
+        # Classify each span into structural roles
+        structural_roles = _classify_structural_roles(page_spans, median_size)
+        
+        # Determine dominant font (most frequent)
+        dominant_sig = font_counter.most_common(1)[0][0] if font_counter else "Unknown"
+        dominant_fonts[f"page_{page_num}"] = dominant_sig
+        
+        # Only flag truly anomalous fonts (< 3% frequency threshold)
+        frequency_threshold = max(1, int(total_spans * 0.03))
+        
+        anomalies_on_page = []
+        for font_sig, count in font_counter.items():
+            if font_sig != dominant_sig and count < frequency_threshold:
+                # Check if this font is appropriate for its structural role
+                spans_with_sig = [s for s in page_spans if s["signature"] == font_sig]
+                
+                # Don't flag if it's used consistently for a structural role
+                roles = [structural_roles.get(id(s), "body") for s in spans_with_sig]
+                if len(set(roles)) == 1 and roles[0] in ["header", "footer", "table_label"]:
+                    continue  # Expected variation for structural role
+                
+                anomalies_on_page.append({
+                    "signature": font_sig,
+                    "count": count,
+                    "frequency": count / total_spans
+                })
+        
+        # Cap at top 5 most deviant per page
+        anomalies_on_page.sort(key=lambda x: x["frequency"])
+        for anomaly in anomalies_on_page[:5]:
+            font_anomalies.append({
+                "location": f"Page {page_num}",
+                "expected_font": dominant_sig,
+                "found_font": anomaly["signature"],
+                "frequency": f"{anomaly['frequency']*100:.1f}%",
+                "severity": "low"
+            })
     
     doc.close()
     
@@ -180,6 +219,48 @@ def _analyze_pdf_fonts(file_path: str) -> dict:
         "font_anomalies": font_anomalies[:10],
         "spacing_anomalies": spacing_anomalies[:10]
     }
+
+
+def _classify_structural_roles(spans: list, median_size: float) -> dict:
+    """Classify text spans into structural roles based on font size and position.
+    
+    Args:
+        spans: List of font info dicts with y_position and size
+        median_size: Median font size for the page
+    
+    Returns:
+        Dict mapping span id() to role: "header", "footer", "table_label", "body"
+    """
+    roles = {}
+    
+    if not spans:
+        return roles
+    
+    # Sort by y_position to find top/bottom regions
+    sorted_spans = sorted(spans, key=lambda s: s.get("y_position", 0))
+    
+    # Top 10% and bottom 10% of page are likely headers/footers
+    top_threshold = sorted_spans[max(0, len(sorted_spans) // 10)].get("y_position", 0)
+    bottom_threshold = sorted_spans[max(0, -len(sorted_spans) // 10)].get("y_position", 999)
+    
+    for span in spans:
+        y_pos = span.get("y_position", 0)
+        size = span.get("size", median_size)
+        is_bold = span.get("bold", False)
+        
+        # Header: larger than median OR bold OR in top region
+        if size > median_size * 1.3 or (is_bold and size >= median_size * 0.9) or y_pos < top_threshold:
+            roles[id(span)] = "header"
+        # Footer: in bottom region or very small
+        elif y_pos > bottom_threshold or size < median_size * 0.8:
+            roles[id(span)] = "footer"
+        # Table label: bold + short text + close to median size
+        elif is_bold and span.get("text_length", 0) < 20:
+            roles[id(span)] = "table_label"
+        else:
+            roles[id(span)] = "body"
+    
+    return roles
 
 
 def _analyze_docx_fonts(file_path: str) -> dict:
